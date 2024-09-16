@@ -195,6 +195,7 @@ class deform_network(nn.Module):
     def forward_static(self, points):
         points = self.deformation_net(points)
         return points
+    
     def forward_dynamic(self, point, scales=None, rotations=None, opacity=None, shs=None, times_sel=None):
         # times_emb = poc_fre(times_sel, self.time_poc)
         point_emb = poc_fre(point,self.pos_poc)

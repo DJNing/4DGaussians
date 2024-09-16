@@ -62,7 +62,9 @@ class Scene:
             scene_info = sceneLoadTypeCallbacks["MultipleView"](args.source_path)
             dataset_type="MultipleView"
         else:
-            assert False, "Could not recognize scene type!"
+            import warnings
+            warnings.warn("Could not recognize scene type! Applying random initialization for the scene!")
+            
         self.maxtime = scene_info.maxtime
         self.dataset_type = dataset_type
         self.cameras_extent = scene_info.nerf_normalization["radius"]

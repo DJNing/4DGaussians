@@ -162,6 +162,7 @@ class GaussianModel:
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         self._deformation_table = torch.gt(torch.ones((self.get_xyz.shape[0]),device="cuda"),0)
+        
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -224,11 +225,12 @@ class GaussianModel:
         for i in range(self._rotation.shape[1]):
             l.append('rot_{}'.format(i))
         return l
-    def compute_deformation(self,time):
+    
+    # def compute_deformation(self,time):
         
-        deform = self._deformation[:,:,:time].sum(dim=-1)
-        xyz = self._xyz + deform
-        return xyz
+    #     deform = self._deformation[:,:,:time].sum(dim=-1)
+    #     xyz = self._xyz + deform
+    #     return xyz
 
     def load_model(self, path):
         print("loading model from exists{}".format(path))
@@ -242,11 +244,14 @@ class GaussianModel:
         if os.path.exists(os.path.join(path, "deformation_accum.pth")):
             self._deformation_accum = torch.load(os.path.join(path, "deformation_accum.pth"),map_location="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        
         # print(self._deformation.deformation_net.grid.)
+        
     def save_deformation(self, path):
         torch.save(self._deformation.state_dict(),os.path.join(path, "deformation.pth"))
         torch.save(self._deformation_table,os.path.join(path, "deformation_table.pth"))
         torch.save(self._deformation_accum,os.path.join(path, "deformation_accum.pth"))
+        
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
 
@@ -458,6 +463,7 @@ class GaussianModel:
     @property
     def get_aabb(self):
         return self._deformation.get_aabb
+    
     def get_displayment(self,selected_point, point, perturb):
         xyz_max, xyz_min = self.get_aabb
         displacements = torch.randn(selected_point.shape[0], 3).to(selected_point) * perturb
@@ -469,8 +475,8 @@ class GaussianModel:
         mask_d = mask_c.all(dim=1)
         final_point = final_point[mask_d]
     
-
-        return final_point, mask_d    
+        return final_point, mask_d
+        
     def add_point_by_mask(self, selected_pts_mask, perturb=0):
         selected_xyz = self._xyz[selected_pts_mask] 
         new_xyz, mask = self.get_displayment(selected_xyz, self.get_xyz.detach(),perturb)
@@ -498,12 +504,14 @@ class GaussianModel:
         self.prune_points(prune_mask)
 
         torch.cuda.empty_cache()
+        
     def densify(self, max_grad, min_opacity, extent, max_screen_size, density_threshold, displacement_scale, model_path=None, iteration=None, stage=None):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
         self.densify_and_clone(grads, max_grad, extent, density_threshold, displacement_scale, model_path, iteration, stage)
         self.densify_and_split(grads, max_grad, extent)
+        
     def standard_constaint(self):
         
         means3D = self._xyz.detach()
@@ -575,3 +583,362 @@ class GaussianModel:
         return total
     def compute_regulation(self, time_smoothness_weight, l1_time_planes_weight, plane_tv_weight):
         return plane_tv_weight * self._plane_regulation() + time_smoothness_weight * self._time_regulation() + l1_time_planes_weight * self._l1_regulation()
+
+
+    # def get_position(self, time, detach_pos=False):
+    #     position = self.position
+    #     normed_time = (time - self.start_frame_id) / self.time_len
+    #     basis = torch.arange(self.poly_feature_dim).float().to(position.device)
+    #     poly_basis = torch.pow(normed_time, basis)[None, :, None]
+
+    #     # al * cos(lt) + bl * sin(lt)
+    #     basis = torch.arange(self.fourier_feature_dim/2).float().to(position.device) + 1
+    #     fourier_basis = [torch.cos(normed_time * basis * np.pi), torch.sin(normed_time * basis * np.pi)]
+    #     fourier_basis = torch.cat(fourier_basis, dim=0)[None, :, None]
+                            
+    #     if detach_pos:
+    #         return position.detach() + torch.sum(self.pos_poly_feat * poly_basis, dim=1) + torch.sum(self.pos_fourier_feat * fourier_basis, dim=1)
+    #     else:
+    #         return position \
+    #             + torch.sum(self.pos_poly_feat * poly_basis, dim=1) \
+    #             + torch.sum(self.pos_fourier_feat * fourier_basis, dim=1)
+    
+class GaussianModel_DDDM(GaussianModel):
+    def __init__(self, sh_degree : int, poly_feat_dim=3, fourier_dim=3, args=None):
+        self.active_sh_degree = 0
+        self.max_sh_degree = sh_degree  
+        self._xyz = torch.empty(0)
+        self._features_dc = torch.empty(0)
+        self._features_rest = torch.empty(0)
+        self._scaling = torch.empty(0)
+        self._rotation = torch.empty(0)
+        self._opacity = torch.empty(0)
+        self.max_radii2D = torch.empty(0)
+        self.xyz_gradient_accum = torch.empty(0)
+        self.denom = torch.empty(0)
+        self.optimizer = None
+        self.percent_dense = 0
+        self.spatial_lr_scale = 0
+        
+        # deformation
+        # self._deformation = deform_network(args)
+        # self._deformation_table = torch.empty(0)
+        self.poly_feat_dim = poly_feat_dim
+        self.fourier_dim = fourier_dim
+        self.pos_pfeat = torch.zeros_like(self._xyz)
+        self.pos_ffeat = torch.zeros_like(self._xyz)
+        self.rot_pfeat = torch.zeros_like(self._rotation)
+        self.rot_ffeat = torch.zeros_like(self._rotation)
+        
+        self.setup_functions()
+    
+    def restore(self, model_args, training_args):
+        (self.active_sh_degree, 
+        self._xyz, 
+        deform_state,
+        self._deformation_table,
+        
+        # self.grid,
+        self._features_dc, 
+        self._features_rest,
+        self._scaling, 
+        self._rotation, 
+        self._opacity,
+        self.max_radii2D, 
+        xyz_gradient_accum, 
+        denom,
+        opt_dict, 
+        self.spatial_lr_scale) = model_args
+        self._deformation.load_state_dict(deform_state)
+        self.training_setup(training_args)
+        self.xyz_gradient_accum = xyz_gradient_accum
+        self.denom = denom
+        self.optimizer.load_state_dict(opt_dict)
+        
+    def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float, time_line: int):
+        self.spatial_lr_scale = spatial_lr_scale
+        # breakpoint()
+        fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
+        fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
+        features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
+        features[:, :3, 0 ] = fused_color
+        features[:, 3:, 1:] = 0.0
+
+        print("Number of points at initialisation : ", fused_point_cloud.shape[0])
+
+        dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
+        scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
+        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+        rots[:, 0] = 1
+
+        opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+
+        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        # self.grid = self.grid.to("cuda")
+        self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+        self._scaling = nn.Parameter(scales.requires_grad_(True))
+        self._rotation = nn.Parameter(rots.requires_grad_(True))
+        self._opacity = nn.Parameter(opacities.requires_grad_(True))
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        
+        # deformation
+        # self._deformation = self._deformation.to("cuda") 
+        # self._deformation_table = torch.gt(torch.ones((self.get_xyz.shape[0]),device="cuda"),0)
+        self.pos_pfeat = nn.Parameter(torch.zeros((fused_point_cloud.shape[0], self.poly_feat_dim, 3), device='cuda'))
+        self.pos_ffeat = nn.Parameter(torch.zeros((fused_point_cloud.shape[0], self.fourier_dim, 3), device='cuda'))
+        self.rot_pfeat = nn.Parameter(torch.zeros((fused_point_cloud.shape[0], self.poly_feat_dim, 4), device='cuda'))
+        self.rot_ffeat = nn.Parameter(torch.zeros((fused_point_cloud.shape[0], self.fourier_dim, 4), device='cuda'))
+        
+    def training_setup(self, training_args):
+        self.percent_dense = training_args.percent_dense
+        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        # self._deformation_accum = torch.zeros((self.get_xyz.shape[0],3),device="cuda")
+        
+
+        l = [
+            {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
+            # {'params': list(self._deformation.get_mlp_parameters()), 'lr': training_args.deformation_lr_init * self.spatial_lr_scale, "name": "deformation"},
+            # {'params': list(self._deformation.get_grid_parameters()), 'lr': training_args.grid_lr_init * self.spatial_lr_scale, "name": "grid"},
+            {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
+            {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
+            {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
+            {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
+            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
+            # deformation params
+            {'params': [self.pos_pfeat], 'lr': training_args.poly_lr * self.spatial_lr_scale, "name": "pos_pfeat"},
+            {'params': [self.pos_ffeat], 'lr': training_args.fourier_lr * self.spatial_lr_scale, "name": "pos_ffeat"},
+            {'params': [self.rot_ffeat], 'lr': training_args.fourier_lr * self.spatial_lr_scale, "name": "rot_pfeat"},
+            {'params': [self.rot_ffeat], 'lr': training_args.fourier_lr * self.spatial_lr_scale, "name": "rot_ffeat"}
+            
+        ]
+
+        self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+        self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
+                                                    lr_final=training_args.position_lr_final*self.spatial_lr_scale,
+                                                    lr_delay_mult=training_args.position_lr_delay_mult,
+                                                    max_steps=training_args.position_lr_max_steps)
+        self.deformation_scheduler_args = get_expon_lr_func(lr_init=training_args.deformation_lr_init*self.spatial_lr_scale,
+                                                    lr_final=training_args.deformation_lr_final*self.spatial_lr_scale,
+                                                    lr_delay_mult=training_args.deformation_lr_delay_mult,
+                                                    max_steps=training_args.position_lr_max_steps)    
+        self.grid_scheduler_args = get_expon_lr_func(lr_init=training_args.grid_lr_init*self.spatial_lr_scale,
+                                                    lr_final=training_args.grid_lr_final*self.spatial_lr_scale,
+                                                    lr_delay_mult=training_args.deformation_lr_delay_mult,
+                                                    max_steps=training_args.position_lr_max_steps) 
+        
+    # def load_model(self, path):
+    #     print("loading model from exists{}".format(path))
+    #     weight_dict = torch.load(os.path.join(path,"deformation.pth"),map_location="cuda")
+    #     self._deformation.load_state_dict(weight_dict)
+    #     self._deformation = self._deformation.to("cuda")
+    #     self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+
+    # def save_deformation(self, path):
+    #     torch.save(self._deformation.state_dict(),os.path.join(path, "deformation.pth"))
+    
+    def load_deformation(self, path):
+        self.pos_pfeat = torch.load(os.path.join(path, 'pose_poly_feat.pth'), map_location='cuda')
+        self.pos_ffeat = torch.load(os.path.join(path, 'pose_fourier_feat.pth'), map_location='cuda')
+        self.rot_pfeat = torch.load(os.path.join(path, 'rot_poly_feat.pth'), map_location='cuda')
+        self.rot_ffeat = torch.load(os.path.join(path, 'rot_fourier_feat.pth'), map_location='cuda')
+        
+        pass
+    
+    def save_deformation(self, path):
+        torch.save(self.pos_pfeat, os.path.join(path, 'pose_poly_feat.pth'))
+        torch.save(self.pos_ffeat, os.path.join(path, 'pose_fourier_feat.pth'))
+        torch.save(self.rot_pfeat, os.path.join(path, 'rot_poly_feat.pth'))
+        torch.save(self.rot_ffeat, os.path.join(path, 'rot_fourier_feat.pth'))
+        pass
+    
+        
+    def prune_points(self, mask):
+        valid_points_mask = ~mask
+        optimizable_tensors = self._prune_optimizer(valid_points_mask)
+
+        self._xyz = optimizable_tensors["xyz"]
+        self._features_dc = optimizable_tensors["f_dc"]
+        self._features_rest = optimizable_tensors["f_rest"]
+        self._opacity = optimizable_tensors["opacity"]
+        self._scaling = optimizable_tensors["scaling"]
+        self._rotation = optimizable_tensors["rotation"]
+        self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
+        self.denom = self.denom[valid_points_mask]
+        self.max_radii2D = self.max_radii2D[valid_points_mask]
+        
+        # need to check this updating
+        # self.poly_feat = optimizable_tensors['poly_feat']
+        # self.fourier_feat = optimizable_tensors['fourier_feat']
+        
+        self.pos_pfeat = optimizable_tensors['pos_pfeat']
+        self.pos_ffeat = optimizable_tensors['pos_ffeat']
+        self.rot_pfeat = optimizable_tensors['rot_pfeat']
+        self.rot_ffeat = optimizable_tensors['rot_ffeat']
+        # deformation modelling
+        # self._deformation_table = self._deformation_table[valid_points_mask]
+        # self._deformation_accum = self._deformation_accum[valid_points_mask]
+        
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_pos_pfeat, new_pos_ffeat, new_rot_pfeat, new_rot_ffeat):
+        d = {"xyz": new_xyz,
+        "f_dc": new_features_dc,
+        "f_rest": new_features_rest,
+        "opacity": new_opacities,
+        "scaling" : new_scaling,
+        "rotation" : new_rotation,
+        "pos_pfeat": new_pos_pfeat,
+        "pos_ffeat": new_pos_ffeat,
+        "rot_pfeat": new_rot_pfeat,
+        "rot_ffeat": new_rot_ffeat
+        # "deformation": new_deformation
+       }
+
+        optimizable_tensors = self.cat_tensors_to_optimizer(d)
+        self._xyz = optimizable_tensors["xyz"]
+        self._features_dc = optimizable_tensors["f_dc"]
+        self._features_rest = optimizable_tensors["f_rest"]
+        self._opacity = optimizable_tensors["opacity"]
+        self._scaling = optimizable_tensors["scaling"]
+        self._rotation = optimizable_tensors["rotation"]
+        
+        # update deformation
+        self.pos_pfeat = optimizable_tensors['pos_pfeat']
+        self.pos_ffeat = optimizable_tensors['pos_ffeat']
+        self.rot_pfeat = optimizable_tensors['rot_pfeat']
+        self.rot_ffeat = optimizable_tensors['rot_ffeat']
+        
+        
+        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        
+        # self._deformation = optimizable_tensors["deformation"]
+        
+        # self._deformation_table = torch.cat([self._deformation_table,new_deformation_table],-1)
+        # self._deformation_accum = torch.zeros((self.get_xyz.shape[0], 3), device="cuda")
+        
+    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
+        n_init_points = self.get_xyz.shape[0]
+        # Extract points that satisfy the gradient condition
+        padded_grad = torch.zeros((n_init_points), device="cuda")
+        padded_grad[:grads.shape[0]] = grads.squeeze()
+        selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
+
+        # breakpoint()
+        selected_pts_mask = torch.logical_and(selected_pts_mask,
+                                              torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
+        if not selected_pts_mask.any():
+            return
+        stds = self.get_scaling[selected_pts_mask].repeat(N,1)
+        means =torch.zeros((stds.size(0), 3),device="cuda")
+        samples = torch.normal(mean=means, std=stds)
+        rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
+        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
+        new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
+        new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
+        new_features_dc = self._features_dc[selected_pts_mask].repeat(N, 1, 1)
+        new_features_rest = self._features_rest[selected_pts_mask].repeat(N, 1, 1)
+        new_opacities = self._opacity[selected_pts_mask].repeat(N, 1)
+        # [pts_num, dim]
+        new_poly_feat = self.poly_feat[selected_pts_mask].repeat(N, 1)
+        new_fourier_feat = self.fourier_feat[selected_pts_mask].repeat(N, 1)
+        
+        new_pos_pfeat = self.pos_pfeat[selected_pts_mask].repeat(N, 1, 1)
+        new_pos_ffeat = self.pos_ffeat[selected_pts_mask].repeat(N, 1, 1)
+        new_rot_pfeat = self.rot_pfeat[selected_pts_mask].repeat(N, 1, 1)
+        new_rot_ffeat = self.rot_ffeat[selected_pts_mask].repeat(N, 1, 1)
+        
+        postfix_dict = {
+            'new_xyz': new_xyz,
+            'new_features_dc': new_features_dc,
+            'new_features_rest': new_features_rest,
+            'new_opacities': new_opacities,
+            'new_scaling': new_scaling,
+            'new_rotation': new_rotation,
+            "pos_pfeat": new_pos_pfeat,
+            "pos_ffeat": new_pos_ffeat,
+            "rot_pfeat": new_rot_pfeat,
+            "rot_ffeat": new_rot_ffeat
+        }
+        
+        # new_deformation_table = self._deformation_table[selected_pts_mask].repeat(N)
+        # self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_deformation_table)
+        self.densification_postfix(**postfix_dict)
+        prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
+        self.prune_points(prune_filter)
+        
+    def densify_and_clone(self, grads, grad_threshold, scene_extent, density_threshold=20, displacement_scale=20, model_path=None, iteration=None, stage=None):
+        grads_accum_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
+        
+
+        selected_pts_mask = torch.logical_and(grads_accum_mask,
+                                              torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
+        new_xyz = self._xyz[selected_pts_mask] 
+        new_features_dc = self._features_dc[selected_pts_mask]
+        new_features_rest = self._features_rest[selected_pts_mask]
+        new_opacities = self._opacity[selected_pts_mask]
+        new_scaling = self._scaling[selected_pts_mask]
+        new_rotation = self._rotation[selected_pts_mask]
+        # new_deformation_table = self._deformation_table[selected_pts_mask]
+        new_poly_feat = self.poly_feat[selected_pts_mask]
+        new_fourier_feat = self.fourier_feat[selected_pts_mask]
+        # self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_deformation_table)
+        
+        postfix_dict = {
+            'new_xyz': new_xyz,
+            'new_features_dc': new_features_dc,
+            'new_features_rest': new_features_rest,
+            'new_opacities': new_opacities,
+            'new_scaling': new_scaling,
+            'new_rotation': new_rotation,
+            'new_poly_feat': new_poly_feat,
+            'new_fourier_feat': new_fourier_feat
+        }
+        self.densification_postfix(**postfix_dict)
+        
+        
+    def get_deformation(self):
+        pass
+    
+    def get_depth(self):
+        pass
+    
+    def get_flow(self):
+        pass
+    
+    def reg_flow(self):
+        pass
+    
+    def reg_arap(self):
+        pass
+    
+    def reg_depth(self):
+        pass
+# class DDDM(nn.Module):
+#     def __init__(self, poly_feat_dim=3, fourier_feat_dim=3, device='cuda') -> None:
+#         super().__init__()
+#         self.poly_feat_dim = poly_feat_dim
+#         self.fourier_feat_dim = fourier_feat_dim
+#         self.device = device
+#         self.register_parameter('poly_coef', nn.Parameter(torch.zeros(poly_feat_dim)))
+#         self.register_parameter('fourier_coef', nn.Parameter(torch.zeros(fourier_feat_dim)))
+        
+    
+#     def get_position(self, time, detach_pos=False):
+#         position = self.position
+#         normed_time = (time - self.start_frame_id) / self.time_len
+#         basis = torch.arange(self.poly_feature_dim).float().to(position.device)
+#         poly_basis = torch.pow(normed_time, basis)[None, :, None]
+
+#         # al * cos(lt) + bl * sin(lt)
+#         basis = torch.arange(self.fourier_feature_dim/2).float().to(position.device) + 1
+#         fourier_basis = [torch.cos(normed_time * basis * np.pi), torch.sin(normed_time * basis * np.pi)]
+#         fourier_basis = torch.cat(fourier_basis, dim=0)[None, :, None]
+                            
+#         if detach_pos:
+#             return position.detach() + torch.sum(self.pos_poly_feat * poly_basis, dim=1) + torch.sum(self.pos_fourier_feat * fourier_basis, dim=1)
+#         else:
+#             return position \
+#                 + torch.sum(self.pos_poly_feat * poly_basis, dim=1) \
+#                 + torch.sum(self.pos_fourier_feat * fourier_basis, dim=1)
