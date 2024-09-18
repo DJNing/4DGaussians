@@ -24,6 +24,8 @@ from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from scene.deformation import deform_network
 from scene.regulation import compute_plane_smoothness
+from pathlib import Path as P
+
 class GaussianModel:
 
     def setup_functions(self):
@@ -898,22 +900,59 @@ class GaussianModel_DDDM(GaussianModel):
         self.densification_postfix(**postfix_dict)
         
         
-    def get_deformation(self):
+    def get_deformation(self, time):
+        static_pos = self._xyz
+        static_rot = self._rotation
+        
         pass
     
-    def get_depth(self):
+    def get_dynamic_position(self, time):
         pass
     
-    def get_flow(self):
+    def get_dynamic_rotation(self, time):
         pass
+    
+    def load_depth(self, root_path: P):
+        
+        depth_path = root_path / 'train_depth' / 'depth_npy'
+        depth_all = [ np.load(str(f)) for f in depth_path.glob('*.npy')]
+        self.depth_all = depth_all
+        
+    
+    def load_flow(self, root_path: P):
+        flow_path = root_path / 'flow_estimation'
+        flow_all = [np.load(str(f)) for f in flow_path.glob('*.npy')]
+        self.flow_all = flow_all
+        
     
     def reg_flow(self):
+
+        # get movement
+
+        # project movement of gaussians to image space
+        
+
         pass
     
     def reg_arap(self):
+        
+        # find knn neighbours
+
+        # estimate rigid transform
+
+        # compute arap loss
+    
+
         pass
     
     def reg_depth(self):
+
+        # get median depth
+
+        # calculate tao(D)
+
+        # calculate expectation
+
         pass
 # class DDDM(nn.Module):
 #     def __init__(self, poly_feat_dim=3, fourier_feat_dim=3, device='cuda') -> None:

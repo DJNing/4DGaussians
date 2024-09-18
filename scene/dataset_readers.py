@@ -30,6 +30,8 @@ from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
 from utils.general_utils import PILtoTorch
 from tqdm import tqdm
+from pathlib import Path as P
+
 class CameraInfo(NamedTuple):
     uid: int
     R: np.array
@@ -43,6 +45,9 @@ class CameraInfo(NamedTuple):
     height: int
     time : float
     mask: np.array
+    alpha: np.array
+    depth: np.array
+    flow: np.array
    
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -257,10 +262,11 @@ def generateCamerasFromTransforms(path, template_transformsfile, extension, maxt
         FovX = fovx
         cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
                             image_path=None, image_name=None, width=image.shape[1], height=image.shape[2],
-                            time = time, mask=None))
+                            time = time, mask=None, alpha=None, flow=None, depth=None))
     return cam_infos
 
-def readCamerasFromTransforms(path, transformsfile, white_background, extension=".png", mapper = {}):
+def readCamerasFromTransforms(path, transformsfile, white_background, extension=".png", mapper = {}, 
+                              load_depth=False, load_flow=False):
     cam_infos = []
 
     with open(os.path.join(path, transformsfile)) as json_file:
@@ -293,10 +299,30 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             fovy = focal2fov(fov2focal(fovx, image.shape[1]), image.shape[2])
             FovY = fovy 
             FovX = fovx
-
+            rgb_path = P(image_path)
+            root_path = rgb_path.parent.parent
+            if load_depth:
+                depth_fname = root_path / 'train_depth' / 'depth_npy' / f'{image_name}.npy'
+                depth = np.load(str(depth_fname))
+            else:
+                depth = None
+                pass
+            if load_flow:
+                flow_fname = root_path / 'flow_estimation' / f'{image_name}.npy'
+                try:
+                    flow = np.load(str(flow_fname))
+                except:
+                    if idx == len(frames) - 1:
+                        pass
+                    else:
+                        raise FileNotFoundError(f'flow file not found for: {str(flow_fname)}')
+            else:
+                flow = None
+                pass
+            
             cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
                             image_path=image_path, image_name=image_name, width=image.shape[1], height=image.shape[2],
-                            time = time, mask=None))
+                            time = time, mask=None, alpha=norm_data[:, :, 3:4], depth=depth, flow=flow))
             
     return cam_infos
 
@@ -357,6 +383,49 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
                            maxtime=max_time
                            )
     return scene_info
+
+def readNerfSyntheticInfo_depth(path, white_background, eval, extension=".png"):
+    timestamp_mapper, max_time = read_timeline(path)
+    print("Reading Training Transforms")
+    train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", white_background, extension, timestamp_mapper, load_depth=True, load_flow=True)
+    print("Reading Test Transforms")
+    test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json", white_background, extension, timestamp_mapper)
+    print("Generating Video Transforms")
+    video_cam_infos = generateCamerasFromTransforms(path, "transforms_train.json", extension, max_time)
+    
+    if not eval:
+        train_cam_infos.extend(test_cam_infos)
+        test_cam_infos = []
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    ply_path = os.path.join(path, "fused.ply")
+    if not os.path.exists(ply_path):
+        # Since this data set has no colmap data, we start with random points
+        num_pts = 5000
+        print(f"Generating random point cloud ({num_pts})...")
+
+        # We create random points inside the bounds of the synthetic Blender scenes
+        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+    # storePly(ply_path, xyz, SH2RGB(shs) * 255)
+    else:
+        pcd = fetchPly(ply_path)
+        # xyz = -np.array(pcd.points)
+        # pcd = pcd._replace(points=xyz)
+
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           video_cameras=video_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path,
+                           maxtime=max_time
+                           )
+    return scene_info
+
 def format_infos(dataset,split):
     # loading
     cameras = []
@@ -696,5 +765,6 @@ sceneLoadTypeCallbacks = {
     "nerfies": readHyperDataInfos,  # NeRFies & HyperNeRF dataset proposed by [https://github.com/google/hypernerf/releases/tag/v0.1]
     "PanopticSports" : readPanopticSportsinfos,
     "MultipleView": readMultipleViewinfos,
-    "random": readSapienInfos
+    "random": readSapienInfos,
+    "Blender_depth": readNerfSyntheticInfo_depth
 }
