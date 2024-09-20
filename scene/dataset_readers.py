@@ -295,7 +295,7 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             norm_data = im_data / 255.0
             arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
             image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
-            image = PILtoTorch(image,(800,800))
+            image = PILtoTorch(image, None)
             fovy = focal2fov(fov2focal(fovx, image.shape[1]), image.shape[2])
             FovY = fovy 
             FovX = fovx
@@ -387,7 +387,9 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
 def readNerfSyntheticInfo_depth(path, white_background, eval, extension=".png"):
     timestamp_mapper, max_time = read_timeline(path)
     print("Reading Training Transforms")
-    train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", white_background, extension, timestamp_mapper, load_depth=True, load_flow=True)
+    train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", 
+                                                white_background, extension, timestamp_mapper, 
+                                                load_depth=True, load_flow=True)
     print("Reading Test Transforms")
     test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json", white_background, extension, timestamp_mapper)
     print("Generating Video Transforms")

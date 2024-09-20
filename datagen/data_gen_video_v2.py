@@ -9,7 +9,7 @@ from tqdm import tqdm
 import imageio
 # scene setup
 
-def scene_setup_v3(urdf_file, h=480, w=640, n=0.1, f=100):
+def scene_setup_v3(urdf_file, h=800, w=800, n=0.1, f=100):
     scene = sapien.Scene()
     scene.set_timestep(1 / 100.0)
 

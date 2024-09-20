@@ -14,9 +14,41 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from math import exp
 import lpips
+
+def depth_regularization(ref, pred, mask=None):
+    if mask is not None:
+        raise NotImplementedError('masked depth regularization is not implemented')
+    
+    # trimmed depth
+    trimmed_ref = trimmed_depth(ref)
+    trimmed_pred = trimmed_depth(pred)
+    loss = F.l1_loss(trimmed_pred, trimmed_ref)
+    return loss
+
+def trimmed_depth(depth):
+    # depth: [B, C, H, W]
+    b, c, h, w = depth.shape
+    depth_reshape = depth.view(b, c, -1)
+    med_d = torch.median(depth, dim=-1, keepdim=True) #[B, N, 1]
+    denorm = torch.mean(depth_reshape - med_d, dim=-1, keepdim=True)
+    trimmed_D = (depth_reshape - med_d) / denorm
+    
+    return trimmed_D
+
+def compute_flow(prev, cur):
+    pass
+
+def flow_regularization(ref, prev, cur, mask):
+    pred_flow = compute_flow(prev, cur)
+    pass
+
+def arap_regularization(prev, cur):
+    pass
+
 def lpips_loss(img1, img2, lpips_model):
     loss = lpips_model(img1,img2)
     return loss.mean()
+
 def l1_loss(network_output, gt):
     return torch.abs((network_output - gt)).mean()
 

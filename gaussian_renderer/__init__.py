@@ -12,7 +12,7 @@
 import torch
 import math
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
-from scene.gaussian_model import GaussianModel
+from scene.gaussian_model import GaussianModel, GaussianModel_DDDM
 from utils.sh_utils import eval_sh
 from time import time as get_time
 
@@ -140,7 +140,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             "radii": radii,
             "depth": depth}
 
-def render_dddm(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, cam_type=None):
+def render_dddm(viewpoint_camera, pc : GaussianModel_DDDM, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, cam_type=None):
     """
     Render the scene. 
     
@@ -200,9 +200,9 @@ def render_dddm(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Ten
         cov3D_precomp = pc.get_covariance(scaling_modifier)
     else:
         scales = pc._scaling
-        rotations = pc._rotation
+        # rotations = pc._rotation
         
-    deformation_point = pc._deformation_table
+    # deformation_point = pc._deformation_table
     
     # if "coarse" in stage:
     #     means3D_final, scales_final, rotations_final, opacity_final, shs_final = means3D, scales, rotations, opacity, shs
@@ -212,15 +212,19 @@ def render_dddm(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Ten
     #     #                                                                  rotations[deformation_point], opacity[deformation_point],
     #     #                                                                  time[deformation_point])
     try:
-        means3D_final, scales_final, rotations_final, opacity_final, shs_final = pc._deformation(means3D, scales, 
-                                                                rotations, opacity, shs,
-                                                                time)
+        # means3D_final, scales_final, rotations_final, opacity_final, shs_final = pc._deformation(means3D, scales, 
+        #                                                         rotations, opacity, shs,
+        #                                                         time)
+        means3D_final, rotations_final = pc.current_pos_rot(time)
     except:
-        raise NotImplementedError('gaussian deformation method is not implemented: pc._deformation!!')
+        raise NotImplementedError('gaussian deformation method for DDDM is not implemented')
 
 
     # time2 = get_time()
     # print("asset value:",time2-time1)
+    opacity_final = opacity
+    shs_final = shs
+    scales_final = scales
     scales_final = pc.scaling_activation(scales_final)
     rotations_final = pc.rotation_activation(rotations_final)
     opacity = pc.opacity_activation(opacity_final)
@@ -262,4 +266,5 @@ def render_dddm(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Ten
             "viewspace_points": screenspace_points,
             "visibility_filter" : radii > 0,
             "radii": radii,
-            "depth": depth}
+            "depth": depth,
+            "means3D_final": means3D_final}

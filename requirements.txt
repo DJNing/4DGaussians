@@ -12,3 +12,4 @@ diffusers>=0.25.0
 matplotlib
 scipy
 numpy<1.26.3
+transformers>=4.32.1

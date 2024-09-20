@@ -13,7 +13,7 @@ import random
 import os, sys
 import torch
 from random import randint
-from utils.loss_utils import l1_loss, ssim, l2_loss, lpips_loss
+from utils.loss_utils import l1_loss, ssim, l2_loss, lpips_loss, depth_regularization, arap_regularization, flow_regularization
 from gaussian_renderer import render, network_gui, render_dddm
 import sys
 from scene import Scene, GaussianModel
@@ -173,14 +173,20 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         if (iteration - 1) == debug_from:
             pipe.debug = True
         images = []
+        depth_images = []
         gt_images = []
+        # gt_depths = []
         radii_list = []
         visibility_filter_list = []
         viewspace_point_tensor_list = []
         for viewpoint_cam in viewpoint_cams:
             render_pkg = render(viewpoint_cam, gaussians, pipe, background, stage=stage,cam_type=scene.dataset_type)
             image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+            depth = render_pkg['depth']
             images.append(image.unsqueeze(0))
+            depth_images.append(depth.unsqueeze(0))
+            # gt_depth = torch.from_numpy(viewpoint_cam.depth).to(depth).unsqueeze(0)
+            # gt_depths += [gt_depth]
             if scene.dataset_type!="PanopticSports":
                 gt_image = viewpoint_cam.original_image.cuda()
             else:
@@ -195,6 +201,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         radii = torch.cat(radii_list,0).max(dim=0).values
         visibility_filter = torch.cat(visibility_filter_list).any(dim=0)
         image_tensor = torch.cat(images,0)
+        # depth_tensor = torch.cat(depth_images, 0)
         gt_image_tensor = torch.cat(gt_images,0)
         # Loss
         # breakpoint()
@@ -333,23 +340,23 @@ def scene_reconstruction_dddm(dataset, opt, hyper, pipe, testing_iterations, sav
     train_cams = scene.getTrainCameras()
 
 
-    if not viewpoint_stack and not opt.dataloader:
+    # if not viewpoint_stack and not opt.dataloader:
         # dnerf's branch
-        viewpoint_stack = [i for i in train_cams]
-        temp_list = copy.deepcopy(viewpoint_stack)
+    viewpoint_stack = [i for i in train_cams]
+        # temp_list = copy.deepcopy(viewpoint_stack)
     # 
     batch_size = opt.batch_size
     print("data loading done")
-    if opt.dataloader:
-        viewpoint_stack = scene.getTrainCameras()
-        if opt.custom_sampler is not None:
-            sampler = FineSampler(viewpoint_stack)
-            viewpoint_stack_loader = DataLoader(viewpoint_stack, batch_size=batch_size,sampler=sampler,num_workers=16,collate_fn=list)
-            random_loader = False
-        else:
-            viewpoint_stack_loader = DataLoader(viewpoint_stack, batch_size=batch_size,shuffle=True,num_workers=16,collate_fn=list)
-            random_loader = True
-        loader = iter(viewpoint_stack_loader)
+    # if opt.dataloader:
+    #     viewpoint_stack = scene.getTrainCameras()
+    #     if opt.custom_sampler is not None:
+    #         sampler = FineSampler(viewpoint_stack)
+    #         viewpoint_stack_loader = DataLoader(viewpoint_stack, batch_size=batch_size,sampler=sampler,num_workers=16,collate_fn=list)
+    #         random_loader = False
+    #     else:
+    #         viewpoint_stack_loader = DataLoader(viewpoint_stack, batch_size=batch_size,shuffle=True,num_workers=16,collate_fn=list)
+    #         random_loader = True
+    #     loader = iter(viewpoint_stack_loader)
     
     
     # dynerf, zerostamp_init
@@ -360,7 +367,7 @@ def scene_reconstruction_dddm(dataset, opt, hyper, pipe, testing_iterations, sav
     #     temp_list = get_stamp_list(viewpoint_stack,0)
     #     viewpoint_stack = temp_list.copy()
     # else:
-    load_in_memory = False 
+    # load_in_memory = False 
                             # 
     count = 0
     for iteration in range(first_iter, final_iter+1):        
@@ -402,43 +409,61 @@ def scene_reconstruction_dddm(dataset, opt, hyper, pipe, testing_iterations, sav
         # Pick a random Camera
 
         # dynerf's branch
-        if opt.dataloader and not load_in_memory:
-            try:
-                viewpoint_cams = next(loader)
-            except StopIteration:
-                print("reset dataloader into random dataloader.")
-                if not random_loader:
-                    viewpoint_stack_loader = DataLoader(viewpoint_stack, batch_size=opt.batch_size,shuffle=True,num_workers=32,collate_fn=list)
-                    random_loader = True
-                loader = iter(viewpoint_stack_loader)
+        # if opt.dataloader and not load_in_memory:
+        # if opt.dataloader:
+        #     try:
+        #         viewpoint_cams = next(loader)
+        #     except StopIteration:
+        #         print("reset dataloader into random dataloader.")
+        #         if not random_loader:
+        #             viewpoint_stack_loader = DataLoader(viewpoint_stack, batch_size=opt.batch_size,shuffle=True,num_workers=32,collate_fn=list)
+        #             random_loader = True
+        #         loader = iter(viewpoint_stack_loader)
 
-        else:
-            idx = 0
-            viewpoint_cams = []
-
-            while idx < batch_size :    
-                    
-                viewpoint_cam = viewpoint_stack.pop(randint(0,len(viewpoint_stack)-1))
-                if not viewpoint_stack :
-                    viewpoint_stack =  temp_list.copy()
-                viewpoint_cams.append(viewpoint_cam)
-                idx +=1
-            if len(viewpoint_cams) == 0:
-                continue
+        # else:
+        # idx = 0
+        # viewpoint_cams = []
+        
+        # while idx < batch_size :    
+                
+        #     viewpoint_cam = viewpoint_stack.pop(randint(0,len(viewpoint_stack)-1))
+        #     # if not viewpoint_stack :
+        #     #     viewpoint_stack =  temp_list.copy()
+        #     viewpoint_cams.append(viewpoint_cam)
+        #     idx +=1
+        if batch_size > 1:
+            raise NotImplementedError('training for batchsize > 1 is not implemented')
+        
+        # viewpoint_cams = []
+        viewpoint_cams = [viewpoint_stack[iteration%len(viewpoint_stack)]]
+        if len(viewpoint_cams) == 0:
+            continue
         # print(len(viewpoint_cams))     
         # breakpoint()   
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
         images = []
+        depth_images = []
         gt_images = []
+        gt_depths = []
         radii_list = []
         visibility_filter_list = []
         viewspace_point_tensor_list = []
+        gt_flows = []
+        # previous_motion = None
+        previous_means_3D = None
         for viewpoint_cam in viewpoint_cams:
+            
             render_pkg = render_dddm(viewpoint_cam, gaussians, pipe, background, stage=stage,cam_type=scene.dataset_type)
             image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+            depth = render_pkg['depth']
             images.append(image.unsqueeze(0))
+            depth_images.append(depth.unsqueeze(0))
+            gt_depth = torch.from_numpy(viewpoint_cam.depth).to(depth).unsqueeze(0)
+            gt_depths += [gt_depth]
+            gt_flow = torch.from_numpy(viewpoint_cam.flow).to(depth).permute(2, 0, 1).unsqueeze(0)
+            gt_flows += [gt_flow]
             if scene.dataset_type!="PanopticSports":
                 gt_image = viewpoint_cam.original_image.cuda()
             else:
@@ -448,37 +473,42 @@ def scene_reconstruction_dddm(dataset, opt, hyper, pipe, testing_iterations, sav
             radii_list.append(radii.unsqueeze(0))
             visibility_filter_list.append(visibility_filter.unsqueeze(0))
             viewspace_point_tensor_list.append(viewspace_point_tensor)
-        
+            cur_means_3D = render_pkg['means3D_final']
 
         radii = torch.cat(radii_list,0).max(dim=0).values
         visibility_filter = torch.cat(visibility_filter_list).any(dim=0)
         image_tensor = torch.cat(images,0)
         gt_image_tensor = torch.cat(gt_images,0)
+        
+        depth_tensor = torch.cat(depth_images, 0)
+        gt_depth_tensor = torch.cat(gt_depths, 0)
         # Loss
         # breakpoint()
         Ll1 = l1_loss(image_tensor, gt_image_tensor[:,:3,:,:])
-
+        
+        
         psnr_ = psnr(image_tensor, gt_image_tensor).mean().double()
         # norm
         
-        # depth regularization
-        depth_pred = render_pkg['depth']
+        # regularization
+        depth_reg = depth_regularization(gt_depth_tensor, depth_tensor, mask=None)
+
+        if previous_means_3D is not None:
+            # compute flow reg
+            
+            # compute arap reg
+            arap_reg = arap_regularization(previous_means_3D, cur_means_3D)
+            pass
         
-        # depth_ref = 
+        previous_means_3D = render_pkg['means3D_final'].detach().clone()
         
-        # flow regularization
-        
-        # flow_ref = 
-        
-        # arap regularization
-    
         loss = Ll1
         if stage == "fine" and hyper.time_smoothness_weight != 0:
             # tv_loss = 0
             tv_loss = gaussians.compute_regulation(hyper.time_smoothness_weight, hyper.l1_time_planes, hyper.plane_tv_weight)
             loss += tv_loss
         if opt.lambda_dssim != 0:
-            ssim_loss = ssim(image_tensor,gt_image_tensor)
+            ssim_loss = ssim(image_tensor, gt_image_tensor)
             loss += opt.lambda_dssim * (1.0-ssim_loss)
         # if opt.lambda_lpips !=0:
         #     lpipsloss = lpips_loss(image_tensor,gt_image_tensor,lpips_model)
@@ -564,7 +594,6 @@ def scene_reconstruction_dddm(dataset, opt, hyper, pipe, testing_iterations, sav
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" +f"_{stage}_" + str(iteration) + ".pth")
                 
                 
-                
 def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname):
     # first_iter = 0
     tb_writer = prepare_output_and_logger(expname)
@@ -573,10 +602,10 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
     timer = Timer()
     scene = Scene(dataset, gaussians, load_coarse=None)
     timer.start()
-    scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
+    scene_reconstruction_dddm(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
                              checkpoint_iterations, checkpoint, debug_from,
                              gaussians, scene, "coarse", tb_writer, opt.coarse_iterations,timer)
-    scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
+    scene_reconstruction_dddm(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
                          checkpoint_iterations, checkpoint, debug_from,
                          gaussians, scene, "fine", tb_writer, opt.iterations,timer)
 

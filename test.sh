@@ -1,0 +1,1 @@
+python render.py --model_path "output/dnerf/laptop_10211_debug/"  --skip_train --configs arguments/dnerf/bouncingballs.py 

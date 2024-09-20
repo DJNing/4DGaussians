@@ -632,6 +632,10 @@ class GaussianModel_DDDM(GaussianModel):
         self.rot_pfeat = torch.zeros_like(self._rotation)
         self.rot_ffeat = torch.zeros_like(self._rotation)
         
+        # set time length
+        self.time_start_id = 0
+        self.time_len = 300
+        
         self.setup_functions()
     
     def restore(self, model_args, training_args):
@@ -900,17 +904,17 @@ class GaussianModel_DDDM(GaussianModel):
         self.densification_postfix(**postfix_dict)
         
         
-    def get_deformation(self, time):
-        static_pos = self._xyz
-        static_rot = self._rotation
+    # def get_deformation(self, time):
+    #     # static_pos = self._xyz
+    #     # static_rot = self._rotation
         
-        pass
+    #     pass
     
-    def get_dynamic_position(self, time):
-        pass
-    
-    def get_dynamic_rotation(self, time):
-        pass
+    def current_pos_rot(self, time):
+        cur_pos = self.get_position(time)
+        cur_rot = self.get_rotation(time)
+        
+        return cur_pos, cur_rot
     
     def load_depth(self, root_path: P):
         
@@ -925,59 +929,40 @@ class GaussianModel_DDDM(GaussianModel):
         self.flow_all = flow_all
         
     
-    def reg_flow(self):
+    def get_position(self, time, detach_pos=False):
+        position = self._xyz
+        normed_time = (time - self.time_start_id) / self.time_len
+        basis = torch.arange(self.poly_feat_dim).float().to(position.device)
+        poly_basis = torch.pow(normed_time, basis)[None, :, None]
 
-        # get movement
-
-        # project movement of gaussians to image space
-        
-
-        pass
-    
-    def reg_arap(self):
-        
-        # find knn neighbours
-
-        # estimate rigid transform
-
-        # compute arap loss
-    
-
-        pass
-    
-    def reg_depth(self):
-
-        # get median depth
-
-        # calculate tao(D)
-
-        # calculate expectation
-
-        pass
-# class DDDM(nn.Module):
-#     def __init__(self, poly_feat_dim=3, fourier_feat_dim=3, device='cuda') -> None:
-#         super().__init__()
-#         self.poly_feat_dim = poly_feat_dim
-#         self.fourier_feat_dim = fourier_feat_dim
-#         self.device = device
-#         self.register_parameter('poly_coef', nn.Parameter(torch.zeros(poly_feat_dim)))
-#         self.register_parameter('fourier_coef', nn.Parameter(torch.zeros(fourier_feat_dim)))
-        
-    
-#     def get_position(self, time, detach_pos=False):
-#         position = self.position
-#         normed_time = (time - self.start_frame_id) / self.time_len
-#         basis = torch.arange(self.poly_feature_dim).float().to(position.device)
-#         poly_basis = torch.pow(normed_time, basis)[None, :, None]
-
-#         # al * cos(lt) + bl * sin(lt)
-#         basis = torch.arange(self.fourier_feature_dim/2).float().to(position.device) + 1
-#         fourier_basis = [torch.cos(normed_time * basis * np.pi), torch.sin(normed_time * basis * np.pi)]
-#         fourier_basis = torch.cat(fourier_basis, dim=0)[None, :, None]
+        # al * cos(lt) + bl * sin(lt)
+        basis = torch.arange(self.fourier_dim/2).float().to(position.device) + 1
+        fourier_basis = [torch.cos(normed_time * basis * np.pi), torch.sin(normed_time * basis * np.pi)]
+        fourier_basis = torch.cat(fourier_basis, dim=0)[None, :, None]
                             
-#         if detach_pos:
-#             return position.detach() + torch.sum(self.pos_poly_feat * poly_basis, dim=1) + torch.sum(self.pos_fourier_feat * fourier_basis, dim=1)
-#         else:
-#             return position \
-#                 + torch.sum(self.pos_poly_feat * poly_basis, dim=1) \
-#                 + torch.sum(self.pos_fourier_feat * fourier_basis, dim=1)
+        if detach_pos:
+            return position.detach() + torch.sum(self.pos_pfeat * poly_basis, dim=1) + torch.sum(self.pos_ffeat * fourier_basis, dim=1)
+        else:
+            return position \
+                + torch.sum(self.pos_pfeat * poly_basis, dim=1) \
+                + torch.sum(self.pos_ffeat * fourier_basis, dim=1)
+                
+    def get_rotation(self, time, detach_rot=False):
+        
+        rot = self._rotation
+        normed_time = (time - self.time_start_id) / self.time_len
+        basis = torch.arange(self.poly_feat_dim).float().to(rot.device)
+        poly_basis = torch.pow(normed_time, basis)[None, :, None]
+
+        # al * cos(lt) + bl * sin(lt)
+        basis = torch.arange(self.fourier_dim/2).float().to(rot.device) + 1
+        fourier_basis = [torch.cos(normed_time * basis * np.pi), torch.sin(normed_time * basis * np.pi)]
+        fourier_basis = torch.cat(fourier_basis, dim=0)[None, :, None]
+                            
+        if detach_rot:
+            return rot.detach() + torch.sum(self.rot_pfeat * poly_basis, dim=1) + torch.sum(self.rot_ffeat * fourier_basis, dim=1)
+        else:
+            return rot \
+                + torch.sum(self.rot_pfeat * poly_basis, dim=1) \
+                + torch.sum(self.rot_ffeat * fourier_basis, dim=1)
+        
